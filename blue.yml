@@ -1,13 +1,13 @@
 apiVersion: apps/v1
 kind: Deployment # Kubernetes resource kind we are creating
 metadata:
-  name: ekart-deployment
+  name: ekart-blue-deployment
 spec:
   selector:
     matchLabels:
       app: ekart
       version: blue
-  replicas: 3 # Number of replicas that will be created for this deployment
+  replicas: 1 # Number of replicas that will be created for this deployment
   template:
     metadata:
       labels:
