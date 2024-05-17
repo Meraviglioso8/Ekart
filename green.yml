@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment # Kubernetes resource kind we are creating
+metadata:
+  name: ekart-deployment
+spec:
+  selector:
+    matchLabels:
+      app: ekart
+      version: green
+  replicas: 3 # Number of replicas that will be created for this deployment
+  template:
+    metadata:
+      labels:
+        app: ekart
+        version: green
+    spec:
+      containers:
+        - name: ekart
+          image: meraviglioso8/shopping-cart:latest # Image that will be used to containers in the cluster
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8070 # The port that the container is running on in the cluster
+
+
+
+
+
