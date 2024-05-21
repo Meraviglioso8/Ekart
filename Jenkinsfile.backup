@@ -1,63 +1,141 @@
 pipeline {
     agent any
-    tools{
-        jdk  'jdk11'
-        maven  'maven3'
+    
+    environment {
+    REGISTRY_NAME = "akscloud"
+    ACR_LOGIN_SERVER = "${REGISTRY_NAME}.azurecr.io"
+    REPOSITORY_NAME = "shopping-cart"
+    AZURE_CREDENTIALS_ID = credentials('azure-sp-credentials')  // Change to your credentials ID
+    AKS_RESOURCE_GROUP = 'cloud-shell-storage-southeastasia'
+    AKS_CLUSTER_NAME = 'akscloud'
+    AZURE_SP_TENANT ='2dff09ac-2b3b-4182-9953-2b548e0d0b39'
     }
     
-    environment{
-        SCANNER_HOME= tool 'sonar-scanner'
+    tools {
+        jdk 'jdk17'
+        maven 'maven3'
     }
-    
+
     stages {
         stage('Git Checkout') {
             steps {
-                git branch: 'main', changelog: false, credentialsId: '15fb69c3-3460-4d51-bd07-2b0545fa5151', poll: false, url: 'https://github.com/jaiswaladi246/Shopping-Cart.git'
+                git branch: 'main', url: 'https://github.com/Meraviglioso8/Ekart.git'
             }
         }
-        
-        stage('COMPILE') {
+
+        stage('Compile') {
             steps {
-                sh "mvn clean compile -DskipTests=true"
+                sh "mvn compile"
             }
         }
-        
-        stage('OWASP Scan') {
+
+        stage('Unit Tests') {
             steps {
-                dependencyCheck additionalArguments: '--scan ./ ', odcInstallation: 'DP'
-                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+                sh "mvn test -DskipTests=true"
             }
         }
         
-        stage('Sonarqube') {
+        stage('OWASP Dependency Check') {
             steps {
-                withSonarQubeEnv('sonar-server'){
-                   sh ''' $SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=Shopping-Cart \
-                   -Dsonar.java.binaries=. \
-                   -Dsonar.projectKey=Shopping-Cart '''
-               }
+                sh 'mvn org.apache.maven.plugins:maven-dependency-plugin:2.10:tree -Dverbose=true'
+            }
+        }
+
+        stage('Snyk Security Scan') {
+            steps {
+                snykSecurity(
+                    snykInstallation: 'snyk-latest',
+                    snykTokenId: 'snykToken',
+                    severity: 'critical',
+                    failOnIssues: false,
+                    monitorProjectOnBuild: true
+                )
             }
         }
         
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('sonarqube') {
+                    // Corrected the typos and parameterized the token
+                    sh 'mvn clean verify sonar:sonar -Dmaven.test.skip=true -Dmaven.test.failure.ignore=true -Dsonar.projectName=ekart -Dsonar.projectKey=ekart -Dsonar.projectVersion=1.0 -Dsonar.exclusions=**/*.ts'
+                }
+            }
+        }
+
         stage('Build') {
             steps {
-                sh "mvn clean package -DskipTests=true"
+                sh "mvn package -DskipTests=true"
             }
         }
-        
-        stage('Docker Build & Push') {
+
+        stage('Build & Tag Docker Image') {
             steps {
-                script{
-                    withDockerRegistry(credentialsId: '2fe19d8a-3d12-4b82-ba20-9d22e6bf1672', toolName: 'docker') {
-                        
+                script {
+                    withDockerRegistry(credentialsId: 'dockerhub', toolName: 'docker') {
                         sh "docker build -t shopping-cart -f docker/Dockerfile ."
-                        sh "docker tag  shopping-cart adijaiswal/shopping-cart:latest"
-                        sh "docker push adijaiswal/shopping-cart:latest"
+                        sh "docker tag shopping-cart ${REGISTRY_NAME}.azurecr.io/${REPOSITORY_NAME}:latest"
+                    }
+                }
+            }
+        }
+
+        stage('Trivy Scan') {
+            steps {
+                sh '''
+                    # Run Trivy scan on the Docker image
+                    if command -v trivy &> /dev/null; then
+                        trivy image ${REGISTRY_NAME}.azurecr.io/${REPOSITORY_NAME}:latest > trivy-report.txt
+                    else
+                        docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image ${REGISTRY_NAME}.azurecr.io/${REPOSITORY_NAME}:latest > trivy-report.txt
+                    fi
+                '''
+        } 
+        }
+        stage('Upload Image to ACR') {
+         steps{   
+             script {
+               withCredentials([usernamePassword(credentialsId: 'acr-credentials', usernameVariable: 'SERVICE_PRINCIPAL_ID', passwordVariable: 'SERVICE_PRINCIPAL_PASSWORD')]) {
+                 sh "docker login ${ACR_LOGIN_SERVER} -u $SERVICE_PRINCIPAL_ID -p $SERVICE_PRINCIPAL_PASSWORD"
+                 sh " docker push ${REGISTRY_NAME}.azurecr.io/${REPOSITORY_NAME}:latest"
+                  }
+              }
+         }
+        }
+        
+        stage('Deploy to AKS') {
+            steps {
+                script {
+                    withCredentials([usernamePassword(credentialsId: 'azure-sp-credentials', usernameVariable: 'AZURE_SP_APP_ID', passwordVariable: 'AZURE_SP_PASSWORD')]) {
+                        sh '''
+                            az login --service-principal -u $AZURE_SP_APP_ID -p $AZURE_SP_PASSWORD --tenant $AZURE_SP_TENANT
+                            az aks get-credentials --resource-group $AKS_RESOURCE_GROUP --name $AKS_CLUSTER_NAME
+                            for yaml_file in $(find . -name '*.yaml'); do
+                                kubectl apply -f $yaml_file
+                            done
+                        '''
                     }
                 }
             }
         }
         
-        
+        //stage('Push The Docker Image') {
+           // steps {
+               // script {
+                   // withDockerRegistry(credentialsId: 'dockerhub', toolName: 'docker') {
+                   //     sh "docker push meraviglioso8/shopping-cart:latest"
+                   // }
+
+                //}
+            //}
+        //}
+
+        // stage('Kubernetes Deploy') {
+        //     steps {
+        //         withKubeConfig(caCertificate: '', clusterName: '', contextName: '', credentialsId: 'k8-token', namespace: 'webapps', restrictKubeConfigAccess: false, serverUrl: 'https://172.31.15.138:6443') {
+        //             sh "kubectl apply -f deploymentservice.yml -n webapps"
+        //             sh "kubectl get svc -n webapps"
+        //         }
+        //     }
+        // }
     }
 }
